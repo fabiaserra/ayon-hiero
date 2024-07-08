@@ -782,7 +782,7 @@ def remove_from_filemenu():
 
 
 def add_to_filemenu():
-    PublishAction()
+    PublishAction(hiero.ui.mainWindow())
 
 
 class PyblishSubmission(hiero.exporters.FnSubmission.Submission):
@@ -807,8 +807,8 @@ class PublishAction(QtWidgets.QAction):
     Action with is showing as menu item
     """
 
-    def __init__(self):
-        QtWidgets.QAction.__init__(self, "Publish", None)
+    def __init__(self, parent=None):
+        super().__init__("Publish", parent)
         self.triggered.connect(self.publish)
 
         for interest in ["kShowContextMenu/kTimeline",
@@ -817,6 +817,10 @@ class PublishAction(QtWidgets.QAction):
             hiero.core.events.registerInterest(interest, self.eventHandler)
 
         self.setShortcut("Ctrl+Alt+P")
+        
+        # Add the action to the parent's actions so it will be considered for shortcuts
+        if parent:
+            parent.addAction(self)
 
     def publish(self):
         from . import publish
