@@ -1,6 +1,6 @@
 name = "hiero"
 title = "Hiero"
-version = "0.2.3-dev.1"
+version = "0.2.3-ax.2"
 client_dir = "ayon_hiero"
 
 ayon_required_addons = {

@@ -267,6 +267,75 @@ def launch_workfiles_app(*args):
 
 def publish(parent):
     """Shorthand to publish from within host"""
+    ### Starts Alkemy-X Override ###
+    # Add some logic to validate selection before showing publish dialog
+    from qtpy import QtWidgets
+
+    # Warn user if there is no edit ref track
+    main_ref_track = lib.get_main_ref_track()
+    if not main_ref_track:
+        answer = QtWidgets.QMessageBox.question(
+            hiero.ui.mainWindow(),
+            "Info",
+            "No edit_ref track found          \n\nWould you like to continue?"
+            )
+        if answer == QtWidgets.QMessageBox.StandardButton.No:
+            return
+
+    # Ensure that selection includes at least one OP Tag
+    # If No OP tag in selection that most likely Editor forgot to add tag
+    selected_track_items = [item for item in lib.get_selected_track_items() if item.mediaType() == hiero.core.TrackItem.kVideo]
+    if not selected_track_items:
+        return
+
+    ignored_op_clips = []
+    for track_item in selected_track_items:
+        if (
+            track_item.parent().isLocked() or not
+            track_item.parent().isEnabled() or not
+            track_item.isEnabled() or not
+            track_item.isMediaPresent()
+        ):
+            ignored_op_clips.append(track_item)
+
+
+    if ignored_op_clips:
+        answer = QtWidgets.QMessageBox.question(
+            hiero.ui.mainWindow(),
+            "Info",
+            "AYON clips in selection that:          \n" \
+            "    Track is locked\n" \
+            "    Track is disabled\n" \
+            "    Clip is disabled\n" \
+            "    Clip is offline\n\n" \
+            "Skipped clips:\n{}\n\n" \
+            "Would you like to continue?".format(
+                "\n".join([item.name() for item in ignored_op_clips]))
+            )
+        if answer == QtWidgets.QMessageBox.StandardButton.No:
+            return
+
+    missing_tags = []
+    for track_item in selected_track_items:
+        if track_item in ignored_op_clips:
+            continue
+        tag = lib.create_ayon_instance(track_item)
+        if tag is not True:
+            missing_tags.append(f"{track_item.parent().name()}.{track_item.name()} - {tag}")
+
+    if missing_tags:
+        QtWidgets.QMessageBox.critical(
+            hiero.ui.mainWindow(), "Invalid track items",
+            ("Listed track items have the following issue\n\n"
+             "{}".format('\n'.join(missing_tags))
+             )
+
+        )
+        return
+
+    selected_track_items[0].sequence().editFinished()
+
+    ### Ends Alkemy-X Override ###
     return host_tools.show_publish(parent)
 
 

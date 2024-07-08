@@ -2,6 +2,7 @@
 Host specific functions where host api is connected
 """
 
+from collections import OrderedDict
 from copy import deepcopy
 import os
 import re
@@ -13,6 +14,7 @@ import ast
 import secrets
 import hiero
 
+import opentimelineio as otio
 from qtpy import QtWidgets, QtCore
 import ayon_api
 try:
@@ -24,6 +26,7 @@ from ayon_core.settings import get_project_settings
 from ayon_core.pipeline import (
     Anatomy,
     get_current_project_name,
+    get_current_folder_path,
     AYON_INSTANCE_ID,
     AVALON_INSTANCE_ID,
 )
@@ -34,6 +37,9 @@ from .constants import (
     OPENPYPE_TAG_NAME,
     DEFAULT_SEQUENCE_NAME,
     DEFAULT_BIN_NAME
+)
+from ayon_core.pipeline.context_tools import (
+    get_hierarchy_env,
 )
 
 
@@ -690,6 +696,44 @@ def launch_workfiles_app(event):
     launch_workfiles_app()
 
 
+### Starts Alkemy-x Override ###
+def set_favorites():
+    from ayon_nuke.api.utils import set_context_favorites
+
+    work_dir = os.getenv("AYON_WORKDIR")
+    asset = get_current_folder_path()
+    favorite_items = OrderedDict()
+
+    project_code = os.getenv("SHOW")
+
+    # project
+    # get project's root and split to parts
+    projects_root = os.path.normpath(work_dir.split(
+        project_code)[0])
+    # add project name
+    project_dir = os.path.join(projects_root, project_code).replace("\\", "/")
+    # No need to add project to hiero favorites as that is a default favorite
+
+    # incoming
+    incoming_dir = os.path.join(project_dir, "io/incoming")
+    favorite_items.update({"Incoming dir": incoming_dir})
+
+    # outgoing
+    outgoing_dir = os.path.join(project_dir, "io/outgoing")
+    favorite_items.update({"Outgoing dir": outgoing_dir})
+
+    # asset
+    asset_dir = os.path.normpath(work_dir.split(work_dir.split(asset)[-1])[0])
+    # add to favorites
+    favorite_items.update({"Shot dir": asset_dir.replace("\\", "/")})
+
+    # workdir
+    favorite_items.update({"Work dir": work_dir.replace("\\", "/")})
+
+    set_context_favorites(favorite_items)
+### Ends Alkemy-x Override ###
+
+
 def setup(console=False, port=None, menu=True):
     """Setup integration
 
@@ -702,6 +746,10 @@ def setup(console=False, port=None, menu=True):
             provided by Pyblish Integration.
         menu (bool, optional): Display file menu in Hiero.
     """
+    ### Starts Alkemy-x Override ###
+    # Add Favorites
+    set_favorites()
+    ### Ends Alkemy-x Override ###
 
     if _CTX.has_been_setup:
         teardown()
@@ -1055,6 +1103,11 @@ def apply_colorspace_project():
     support. See https://community.foundry.com/discuss/topic/137771/change-a-project-s-default-color-transform-with-python  # noqa
     for more details.
     """
+    ### Starts Alkemy-X Override ###
+    # we rely on setting $OCIO
+    return
+    ### Ends Alkemy-X Override ###
+
     # get presets for hiero
     project_name = get_current_project_name()
     imageio = get_project_settings(project_name)["hiero"]["imageio"]
@@ -1379,3 +1432,653 @@ def get_main_window():
                            widget.metaObject().className() == name)
         _CTX.parent_gui = main_window
     return _CTX.parent_gui
+
+
+### Starts Alkemy-X Override ###
+def regex_parse_edl_events(path, color_edits_only=False):
+    """
+    EDL is parsed using OTIO and then placed into a data struture for output "edl"
+    Data is stored under the understanding that it will be used for identifying plate names which are linked to CDLs
+
+    EDL LOC metadata is parsed with OTIO under markers and then regexed to find the main bit of information which
+    will link it to a plate name further down the line
+
+    Underscores are not counted ({0,}) but are left greedy incase naming doesn't follow normal shot convention
+    but instead follows plate pull naming convention.
+    Example: abc_101_010_010_element
+    Example: abc_101_010_010_element_fire
+
+    Examples of targeted matches:
+    abc_101_010_010_element
+    abc_101_010_010
+    abc_101_010
+    101_010_010
+
+    Examples of what does not match:
+    abc_101
+    101_001
+    _abc_101_010
+    abc_101_010_
+    """
+    # Define regex patterns
+    edit_pattern = r"(?<=[\n\r])(?P<edit>\d+\s+[\s\S]*?)(?=([\n\r]+\d+)|\Z)"
+    sop_pattern = r"[*]\s?ASC[_]SOP\s+[(]\s?(?P<sR>[-]?\d+[.]\d{4,6})\s+(?P<sG>[-]?\d+[.]\d{4,6})\s+(?P<sB>[-]?\d+[.]\d{4,6})\s?[)]\s?[(]\s?(?P<oR>[-]?\d+[.]\d{4,6})\s+(?P<oG>[-]?\d+[.]\d{4,6})\s+(?P<oB>[-]?\d+[.]\d{4,6})\s?[)]\s?[(]\s?(?P<pR>[-]?\d+[.]\d{4,6})\s+(?P<pG>[-]?\d+[.]\d{4,6})\s+(?P<pB>[-]?\d+[.]\d{4,6})\s?[)]\s?"
+    sat_pattern = r"[*]\s?ASC_SAT\s+(?P<sat>\d+[.]*\d*)"
+    tape_pattern = r"\d+\s*(?P<source>[\S]*)(?=\s*)"
+    clip_name_pattern = r"[*]\s?FROM[ ]*CLIP[ ]*NAME:\s*(?P<clip_name>.+)"
+    loc_pattern = r"[*]\s?LOC:\s?.+\b(?<!_)(?P<LOC>[\w]{3,4}_((?<=_)[\w]{3,4}_){1,2}[\w]{3,4}(?<!_)(_[\w]{1,}){0,})\b"
+
+    with open(path, "r") as f:
+        edl_data = f.read()
+
+    # Need to find first entry in edit list for range
+    first_match = re.search(edit_pattern, edl_data)
+    first_entry = int(first_match.group().split(" ", 1)[0]) if first_match else 1
+
+    edl = {"events": {}}
+    for edit_match in re.finditer(edit_pattern, edl_data):
+        slope, offset, power, sat = None, None, None, None
+
+        edit_value = edit_match.group("edit")
+        # Determine if color data is present in event and store it
+        sop_match = re.search(sop_pattern, edit_value)
+        if sop_match:
+            slope, offset, power = (
+                tuple(map(float, (sop_match.group("sR"), sop_match.group("sG"), sop_match.group("sB")))),
+                tuple(map(float, (sop_match.group("oR"), sop_match.group("oG"), sop_match.group("oB")))),
+                tuple(map(float, (sop_match.group("pR"), sop_match.group("pG"), sop_match.group("pB")))),
+            )
+
+        # Always record even numbers
+        entry = str(int(edit_value.split(" ", 1)[0]))
+        # edl["entries"].append(entry)
+
+        # Clip Name value
+        clip_name_match = re.search(clip_name_pattern, edit_value)
+        clip_name_value = clip_name_match.group("clip_name") if clip_name_match else ""
+
+        # Tape value
+        tape_match = re.search(tape_pattern, edit_value)
+        tape_value = tape_match.group("source") if tape_match else ""
+
+        # LOC value
+        loc_match = re.search(loc_pattern, edit_value)
+        loc_value = loc_match.group("LOC") if loc_match else ""
+
+
+        # Do rest of regex find if color data was found.
+        if not (slope is None and offset is None and power is None):
+            # Sat value doesn't need to be found. If not found default to 1
+            sat_match = re.search(sat_pattern, edit_value)
+            sat = sat_match.group("sat") if sat_match else 1
+
+            edl["events"][entry] = {
+                "tape": tape_value,
+                "clip_name": clip_name_value,
+                "LOC": loc_value,
+                "slope": slope,
+                 "offset": offset,
+                 "power": power,
+                 "sat": sat,
+                 }
+        else:
+            if not color_edits_only:
+                edl["events"][entry] = {
+                    "tape": tape_value,
+                    "clip_name": clip_name_value,
+                    "LOC": loc_value,
+                }
+
+    # Add last found entry from edit list iteration
+    last_entry = int(edit_value.split(" ", 1)[0])
+
+    # Finish EDL info
+    edl["first_entry"] = first_entry
+    edl["last_entry"] = last_entry
+
+    return edl
+
+
+def otio_parse_edl_events(path, color_edits_only=False):
+    """EDL is parsed using OTIO and then placed into a dictionary
+
+    Data is stored under the understanding that it will be used for identifying
+    plate names which are linked to CDLs.
+
+    EDL LOC metadata is parsed with OTIO under markers and then regexed to find
+    the main bit of information which will link it to a plate name further down
+    the line.
+
+    Underscores are not counted ({0,}) but are left greedy incase naming
+    doesn't follow normal shot convention but instead follows plate pull naming
+    convention.
+
+    Plate pull naming convention:
+    Example: abc_101_010_010
+    Example: abc_101_010_010_element
+    Example: abc_101_010_010_element_fire
+
+    Examples of targeted matches:
+    abc_101_010_010_element
+    abc_101_010_010
+    abc_101_010
+    101_010_010
+
+    Examples of what does not match:
+    abc_101
+    101_001
+    _abc_101_010
+    abc_101_010_
+
+    Args:
+        path (str): The path of the EDL file.
+        color_edits_only (bool, optional): Whether to include only color edits.
+            Defaults to False.
+
+    Returns:
+        dict: A dictionary containing information about the events in the EDL
+            file.
+            - "events" (dict): where the key is the event number and the value
+                is a dictionary containing information about the event.
+                - "clip_name" (str): clip name
+                - "tape" (str): tape name,
+                - "LOC" (str): metadata,
+
+                CDL information (if applicable)
+                - "slope" (tuple): CDL Slope.
+                - "offset (tuple): CDL Offset.
+                - "power" (tuple): CDL Power.
+                - "sat" (float): CDL Saturation.
+
+            - "first_entry" (int): The number of the first event in the EDL.
+            - "last_entry" (int): The number of the last event in the EDL.
+
+    Raises:
+        Exception: If the EDL file contains more than one track.
+    """
+    shot_pattern = r"(?<!_)(?P<LOC>[a-zA-Z0-9]{3,4}_((?<=_)[a-zA-Z0-9]{3,4}_)"\
+        "{1,2}[a-zA-Z0-9]{3,4}(?<!_)(_[a-zA-Z0-9]{1,}){0,})\b"
+
+    # ignore_timecode_mismatch is set to True to ensure that OTIO doesn't get
+    # confused by TO CLIP NAME and FROM CLIP NAME timecode ranges
+    timeline = otio.adapters.read_from_file(
+        path, ignore_timecode_mismatch=True
+    )
+
+    if len(timeline.tracks) > 1:
+        raise Exception(
+            "EDL '%s' can not contain more than one track. Something went wrong" % path
+        )
+
+    edl = {"events": {}}
+
+    # There is a possibility that the entry count doesn't start at 1.
+    # However it's extremely rare and it's purpose is to keep track of order
+    entry_count = 0
+    for clip in timeline.tracks[0].each_child():
+        if not isinstance(clip, otio.schema.Clip):
+            continue
+
+        entry_count += 1
+        loc_value = ""
+        tape_value = ""
+        entry = {"clip_name": clip.name}
+        cdl = clip.metadata.get("cdl")
+        if cdl:
+            entry.update(
+                {
+                    "slope": tuple(cdl["asc_sop"]["slope"]),
+                    "offset": tuple(cdl["asc_sop"]["offset"]),
+                    "power": tuple(cdl["asc_sop"]["power"]),
+                    "sat": cdl.get("asc_sat") or 1.0,
+                }
+            )
+        elif color_edits_only:
+            continue
+
+        if clip.markers:
+            # Join markers (*LOC). The data is strictly being stored to parse
+            # shot name Space is added to make parsing much easier and
+            # predictable
+            full_clip_loc = " ".join([" "] + [m.name for m in clip.markers])
+            loc_match = re.search(shot_pattern, full_clip_loc)
+            loc_value = loc_match.group("LOC") if loc_match else ""
+
+        # Capture tape and source name
+        cmx_3600 = clip.metadata.get("cmx_3600")
+        if cmx_3600:
+            tape_value = cmx_3600.get("reel", "")
+
+        entry.update(
+            {
+                "tape": tape_value,
+                "LOC": loc_value,
+            }
+        )
+        edl["events"][entry_count] = entry
+
+    # Finish EDL info
+    edl["first_entry"] = 1
+    edl["last_entry"] = entry_count
+
+    return edl
+
+
+def parse_edl_events(color_file, color_edits_only=True):
+    try:
+        edl = otio_parse_edl_events(color_file, color_edits_only)
+
+    except UnicodeDecodeError:
+        return False
+
+    except:
+        # Try using regex to parse if OTIO fails
+        try:
+            edl = regex_parse_edl_events(color_file, color_edits_only)
+        except:
+            return False
+
+    return edl
+
+
+def parse_cdl(path):
+    """Parses cdl formatted xml using regex to find Slope, Offset, Power, and
+        Saturation.
+
+    Args:
+        path (str): The path to a grade file that follows ASC xml formatting.
+
+    Returns:
+        dict: A dictionary containing the parsed slope, offset, power, and
+            saturation values, as well as the path to the file.
+    """
+
+    with open(path, "r") as f:
+        cdl_data = f.read().lower()
+
+    slope_pattern = r"<slope>(?P<sR>[-,\d,.]*)[ ]{1}(?P<sG>[-,\d,.]+)[ ]{1}(?P<sB>[-,\d,.]*)</slope>"
+    offset_pattern = r"<offset>(?P<oR>[-,\d,.]*)[ ]{1}(?P<oG>[-,\d,.]+)[ ]{1}(?P<oB>[-,\d,.]*)</offset>"
+    power_pattern = r"<power>(?P<pR>[-,\d,.]*)[ ]{1}(?P<pG>[-,\d,.]+)[ ]{1}(?P<pB>[-,\d,.]*)</power>"
+    sat_pattern = r"<saturation\>(?P<sat>[-,\d,.]+)</saturation\>"
+
+    slope_match = re.search(slope_pattern, cdl_data)
+    if slope_match:
+        slope = tuple(map(float, slope_match.groups()))
+    else:
+        slope = None
+
+    offset_match = re.search(offset_pattern, cdl_data)
+    if offset_match:
+        offset = tuple(map(float, offset_match.groups()))
+    else:
+        offset = None
+
+    power_match = re.search(power_pattern, cdl_data)
+    if power_match:
+        power = tuple(map(float, power_match.groups()))
+    else:
+        power = None
+
+    sat_match = re.search(sat_pattern, cdl_data)
+    sat = float(sat_match.group("sat")) if sat_match else None
+
+    cdl = {
+        "slope": slope,
+        "offset": offset,
+        "power": power,
+        "sat": sat,
+        "file": path,
+    }
+
+    return cdl
+
+
+def get_main_ref_track(track_item=None):
+    if track_item:
+        sequence = track_item.sequence()
+    else:
+        sequence = hiero.ui.activeSequence()
+
+    video_tracks = sequence.videoTracks()
+    for track in video_tracks:
+        if track.name() == "edit_ref":
+            return track
+
+    return None
+
+
+class MainPlate():
+    def sequence(function):
+        """Decorator class funtion that ensures that the conditions needed to
+        operate main plate changes are met
+        """
+        def wrapper(self, *args, **kwargs):
+            # Need to know the main track in order to perform operations
+            if not self.main_track and self.track_items:
+                return None
+
+            result = function(self, *args, **kwargs)
+
+            return result
+
+        return wrapper
+
+    def get_track_index(self=None, track=None):
+        video_tracks = hiero.ui.activeSequence().videoTracks()
+        track_index = video_tracks.index(track)
+
+        return track_index
+
+    def get_main_plate_track(self=None):
+        main_plate_track = None
+        sequence = hiero.ui.activeSequence()
+        for track in sequence.videoTracks():
+            if not "ref" in track.name():
+                main_plate_track = track
+                break
+
+        return main_plate_track
+
+    def get_plate_tracks(self=None):
+        if not self:
+            main_plate = MainPlate.get_main_plate_track()
+        else:
+            main_plate = self.main_track
+
+        video_tracks = hiero.ui.activeSequence().videoTracks()
+        main_plate_index = MainPlate.get_track_index(track=main_plate)
+        plate_tracks = video_tracks[main_plate_index:]
+
+        return plate_tracks
+
+    def get_ref_tracks(self=None):
+        if not self:
+            main_plate = MainPlate.get_main_plate_track()
+        else:
+            main_plate = self.main_track
+
+        video_tracks = hiero.ui.activeSequence().videoTracks()
+        main_plate_index = MainPlate.get_track_index(track=main_plate)
+        plate_tracks = video_tracks[:main_plate_index]
+
+        return plate_tracks
+
+    def __init__(self):
+        # Should main grade be a track index instead?
+        self.main_track = self.get_main_plate_track()
+        self.track_plate_items = self.get_plate_track_items()
+        self.track_ref_items = self.get_ref_track_items()
+
+    def get_plate_track_items(self):
+        track_items = []
+        for track in self.get_plate_tracks():
+            track_items.extend(track.items())
+
+        return track_items
+
+    def get_ref_track_items(self):
+        track_items = []
+        for track in self.get_ref_tracks():
+            track_items.extend(track.items())
+
+        return track_items
+
+    @sequence
+    def set_track_item_main_plate(self, track_item):
+        shot_name = track_item.name()
+        shot_items = [track_item for track_item in self.track_plate_items if track_item.name() == shot_name]
+        main_plate_tags_to_remove = []
+        has_main_track = False
+        # Check to see if a item of the shot is on main grade track
+        # If so then if no override set that track item as main
+        if self.main_track.name() == shot_items[0].parent().name():
+            has_main_track = True
+
+        remove_default_tags = False
+        # track items need to be sorted by track index
+        # sorted(shot_items, key=lambda item: item MainPlate.get_track_index(item))
+        for shot_item in shot_items:
+            main_plate_tag = shot_item.get_main_plate()
+            # If override found leave shot altogether
+            if not main_plate_tag:
+                continue
+            if "override" in main_plate_tag.metadata():
+                remove_default_tags = True
+            else:
+                # Default tag list. Main track will never be added
+                main_plate_tags_to_remove.append((shot_item, main_plate_tag))
+
+
+        # Remove default tags needs to inlude potentially old plate tracks
+        for track_ref_item in self.track_ref_items:
+            if track_ref_item.name() == shot_name:
+                main_plate_tag = track_ref_item.get_main_plate()
+                if not main_plate_tag:
+                    continue
+                main_plate_tags_to_remove.append((track_ref_item, main_plate_tag))
+
+        # Set default tag on main track item
+        if has_main_track and not remove_default_tags:
+            main_track_tag = (shot_items[0], shot_items[0].get_main_plate())
+
+            # Remove main grade from remove list and add tag if not found and no override
+            tagged_tracks = [tag[0].parent() for tag in main_plate_tags_to_remove]
+            if shot_items[0].parent() in tagged_tracks:
+                main_plate_tags_to_remove.pop(0)
+            else:
+                shot_items[0].set_main_plate(default_tag=True, spreadsheet=False)
+
+        for track_item, tag in main_plate_tags_to_remove:
+            # Sometimes the track doesn't update
+            try:
+                track_item.removeTag(tag)
+            except RuntimeError:
+                pass
+
+    @sequence
+    def set_track_main_plates(self):
+        # Main grades will only ever be set on main grade track
+        for track_item in self.main_track.items():
+            self.set_track_item_main_plate(track_item)
+
+
+def is_valid_folder(track_item):
+    """Check if the given folder name is valid for the current project.
+
+    Args:
+        asset_name (str): The name of the asset to validate.
+
+    Returns:
+        dict: The folder entity if found, otherwise an empty dictionary.
+    """
+    # Track item may not have ran through callback to is valid attr
+    if "hierarchy_env" in track_item.__dir__():
+        return track_item.hierarchy_env
+
+    project_name = get_current_project_name()
+    current_folder = ayon_api.get_folder_by_name(project_name, track_item.name())
+    if current_folder:
+        return True
+    
+    return False
+
+
+def get_entity_hierarchy(folder_entity, project_name):
+    """Retrieve entity links for the given asset.
+
+    This function creates a dictionary of linked entities for the specified
+    asset. The linked entities may include:
+    - episode
+    - sequence
+    - shot
+    - folder
+
+    Args:
+        asset_name (str): The name of the asset.
+
+    Returns:
+        dict: A dictionary containing linked entities, including episode,
+                sequence, shot, and folder information.
+    """
+    project_entity = ayon_api.get_project(project_name)
+    hierarchy_env = get_hierarchy_env(project_entity, folder_entity)
+
+    folder_entities = {}
+    episode = hierarchy_env.get("EPISODE")
+    if episode:
+        folder_entities["episode"] = episode
+
+    sequence = hierarchy_env.get("SEQ")
+    if sequence:
+        folder_entities["sequence"] = sequence
+
+    asset = hierarchy_env.get("SHOT")
+    if asset:
+        folder_entities["shot"] = asset
+
+    if hierarchy_env.get("ASSET_TYPE"):
+        folder = "asset"
+    else:
+        folder = "shots"
+    folder_entities["folder"] = folder
+
+    return folder_entities
+
+
+def get_hierarchy_data(folder_entity, project_name, track_name):
+    hierarchy_data = get_entity_hierarchy(folder_entity, project_name)
+    hierarchy_data["track"] = track_name
+
+    return hierarchy_data
+
+
+def get_hierarchy_path(folder_entity):
+    """Asset path is always the joining of the asset parents"""
+    hierarchy_path = os.sep.join(folder_entity["data"]["parents"])
+
+    return hierarchy_path
+
+
+def get_hierarchy_parents(hierarchy_data):
+    parents = []
+    parents_types = ["folder", "episode", "sequence"]
+    for key, value in hierarchy_data.items():
+        if key in parents_types:
+            entity = {"folder_type": key, "entity_name": value}
+            parents.append(entity)
+
+    return parents
+
+
+def set_framing_info(cut_info, track_item):
+    # Only reference will update cut info to SG
+    cut_info["cut_in"] = int(cut_info["cut_in"])
+    # cut info will almost always exist except for old style tags
+    if cut_info.get("cut_range", "True") == "False":
+        cut_info["head_handles"] = int(track_item.handleInLength())
+        cut_info["tail_handles"] = int(track_item.handleOutLength())
+    else:
+        cut_info["head_handles"] = int(cut_info["head_handles"])
+        cut_info["tail_handles"] = int(cut_info["tail_handles"])
+
+    # Cut out is always cut_in + duration - 1
+    cut_out = cut_info["cut_in"] + track_item.duration() - 1
+    cut_info["cut_out"] = cut_out
+
+    return cut_info
+
+
+def create_ayon_instance(track_item):
+    """
+    Only one key of the tag can be modified at a time for items that already
+    have a tag.
+    """
+    track_item_name = track_item.name()
+    track_name = track_item.parentTrack().name()
+
+    ingest_instance_data = track_item.ingest_instance_data()
+    cut_info_data = track_item.cut_info_data()
+    if not cut_info_data:
+        log.info(
+            f"{track_item.parent().name()}.{track_item.name()}: "
+            "No cut info tag!"
+        )
+        return "No cut info tag"
+
+    if not ingest_instance_data:
+        log.info(
+            f"{track_item.parent().name()}.{track_item.name()}: "
+            "No ingest data tag!"
+        )
+
+        return "No ingest data tag"
+
+    # Check if asset has valid name
+    if not is_valid_folder(track_item):
+        log.info(
+            f"{track_item.parent().name()}.{track_item.name()}: "
+            "Track item name not found in DB!"
+        )
+
+        return "Shot not found in DB"
+
+    else:
+        project_name = get_current_project_name()
+        folder_entity = ayon_api.get_folder_by_name(project_name, track_item.name())
+
+    instance_data = {}
+
+    family = ingest_instance_data["family"]
+    families = ["clip"]
+    if family == "plate":
+        families.append("review")
+
+    use_nuke = ingest_instance_data["use_nuke"]
+
+    hierarchy_data = get_hierarchy_data(
+        folder_entity, project_name, track_name
+    )
+    hierarchy_parents = get_hierarchy_parents(hierarchy_data)
+    hierarchy_path = folder_entity["path"]
+
+    # Framing comes from tag
+    cut_info = set_framing_info(cut_info_data, track_item)
+    instance_data["cut_info_data"] = cut_info
+
+    frame_start = cut_info["cut_in"] - cut_info["head_handles"]
+    handle_start = cut_info["head_handles"]
+    handle_end = cut_info["tail_handles"]
+
+    main_plate = "True" if track_item.get_main_plate() else "False"
+    main_ref = "True" if get_main_ref_track(track_item) == track_item.parent() else "False"
+
+    instance_data["hierarchyData"] = hierarchy_data
+    instance_data["hierarchy"] = hierarchy_path
+    instance_data["parents"] = hierarchy_parents
+    instance_data["folderPath"] = hierarchy_path
+    instance_data["folder"] = track_item_name
+    instance_data["asset_name"] = track_item_name
+    instance_data["productName"] = track_name
+    instance_data["productType"] = family
+    instance_data["family"] = family
+    instance_data["families"] = str(families)
+    instance_data["workfileFrameStart"] = frame_start
+    instance_data["handleStart"] = handle_start
+    instance_data["handleEnd"] = handle_end
+    instance_data["main_plate"] = main_plate
+    instance_data["main_ref"] = main_ref
+    instance_data["use_nuke"] = use_nuke
+
+    # Constants
+    instance_data["audio"] = "True"
+    instance_data["heroTrack"] = "True"
+    instance_data["id"] = "pyblish.avalon.instance"
+    instance_data["publish"] = "True"
+    instance_data["reviewTrack"] = "None"
+    instance_data["sourceResolution"] = "False"
+    instance_data["variant"] = "Main"
+    instance_data["ingested_grade"] = "None"
+
+    tag = set_trackitem_openpype_tag(track_item, instance_data)
+    return True if tag else "AYON tag couldn't be added"
+### Ends Alkemy-X Override ###

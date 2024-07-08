@@ -77,7 +77,9 @@ class PrecollectWorkfile(pyblish.api.ContextPlugin):
         }
 
         # create instance with workfile
-        instance = context.create_instance(**instance_data)
+        ### Starts Alkemy-x Override ###
+        # instance = context.create_instance(**instance_data)
+        ### Ends Alkemy-x Override ###
 
         # update context with main project attributes
         context_data = {
@@ -91,9 +93,11 @@ class PrecollectWorkfile(pyblish.api.ContextPlugin):
         self.log.debug("__ context_data: {}".format(pformat(context_data)))
         context.data.update(context_data)
 
-        self.log.info("Creating instance: {}".format(instance))
-        self.log.debug("__ instance.data: {}".format(pformat(instance.data)))
-        self.log.debug("__ context_data: {}".format(pformat(context_data)))
+        ### Starts Alkemy-x Override ###
+        # self.log.info("Creating instance: {}".format(instance))
+        # self.log.debug("__ instance.data: {}".format(pformat(instance.data)))
+        # self.log.debug("__ context_data: {}".format(pformat(context_data)))
+        ### Ends Alkemy-x Override ###
 
     def get_colorspace(self, project):
         # get workfile's colorspace properties

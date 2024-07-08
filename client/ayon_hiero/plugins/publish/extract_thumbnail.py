@@ -11,7 +11,7 @@ class ExtractThumbnail(publish.Extractor):
 
     label = "Extract Thumbnail"
     order = pyblish.api.ExtractorOrder
-    families = ["plate", "take"]
+    families = ["plate", "take", "reference"]
     hosts = ["hiero"]
 
     def process(self, instance):
@@ -19,7 +19,21 @@ class ExtractThumbnail(publish.Extractor):
         if "representations" not in instance.data:
             instance.data["representations"] = []
 
-        staging_dir = self.staging_dir(instance)
+        ### Starts Alkemy-X Override ###
+        # Set staging dir to a shared disk location instead of temp local disk
+        # so we can run the extraction and publish in the farm
+        staging_dir = os.path.join(
+            os.getenv("AYON_WORKDIR"), "temp_transcode"
+        )
+
+        # Create staging dir if it doesn't exist
+        try:
+            if not os.path.isdir(staging_dir):
+                os.makedirs(staging_dir, exist_ok=True)
+        except OSError:
+            # directory is not available
+            self.log.warning("Path is unreachable: `{}`".format(staging_dir))
+        ### Ends Alkemy-X Override ###
 
         self.create_thumbnail(staging_dir, instance)
 

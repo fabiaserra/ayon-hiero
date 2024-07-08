@@ -10,7 +10,7 @@ import qargparse
 
 from ayon_core.settings import get_current_project_settings
 from ayon_core.lib import Logger
-from ayon_core.pipeline import LoaderPlugin, LegacyCreator
+from ayon_core.pipeline import LoaderPlugin, LegacyCreator, get_current_project_name
 from ayon_core.pipeline.load import get_representation_path_from_context
 from . import lib
 
@@ -635,6 +635,9 @@ class PublishClip:
     tag_data = {}
     types = {
         "shot": "shot",
+        ### Starts Alkemy-X Override ###
+        "path": "path",
+        ### Ends Alkemy-X Override ###
         "folder": "folder",
         "episode": "episode",
         "sequence": "sequence",
@@ -684,11 +687,29 @@ class PublishClip:
         # adding ui inputs if any
         self.ui_inputs = kwargs.get("ui_inputs", {})
 
+        ### Starts Alkemy-X Override ###
+        # If shot path token found, update hierarchy data to respect those values
+        hierarchy_data_value = self.ui_inputs.get("hierarchy", {}).get("value")
+        hierarchy_value = self.ui_inputs.get("hierarchy", {}).get("value")
+        if hierarchy_data_value:
+            # Only update episode, sequence, shot values if they are being used for path token
+            # If path token is being used UI values will be ignored
+            # Meaning episode, sequence, and shot will not react as expected when using path
+            if "{path}" in hierarchy_value:
+                self.update_path_token_hierarchy()
+        ### Ends Alkemy-X Override ###
+
         # populate default data before we get other attributes
         self._populate_track_item_default_data()
 
         # use all populated default data to create all important attributes
         self._populate_attributes()
+
+        ### Starts Alkemy-X Override ###
+        # Override self.hierarchy if path token was updated
+        if hierarchy_value:
+            self.solve_path_token_hierarchy()
+        ### Ends Alkemy-X Override ###
 
         # create parents with correct types
         self._create_parents()
@@ -736,6 +757,46 @@ class PublishClip:
         lib.imprint(self.track_item, self.tag_data)
 
         return self.track_item
+
+    ### Starts Alkemy-X Override ###
+    def update_path_token_hierarchy(self):
+        """Update UI inputs from clip name to avoid typing values for episode/sequence.
+        Need to recreate the entity relationship that would be seen in Shotgrid
+        There is an assumption that the hierarchy is build for a shot/asset
+        """
+        project_name = get_current_project_name()
+        entity_hierarchy = lib.get_entity_hierarchy(self.ti_name, project_name)
+        if not entity_hierarchy:
+            QtWidgets.QMessageBox.warning(
+                hiero.ui.mainWindow(),
+                "Info",
+                "Asset/Shot does not exist in Database. Make sure asset/shot is in Shotgrid. If made recently it can take time for initial Sync",
+            )
+            raise Exception("Asset/Shot does not exist in Database")
+    
+        self.shot_path_tokens = {
+            "episode": entity_hierarchy.get("episode") or "",
+            "sequence": entity_hierarchy.get("sequence") or "",
+            "shot": entity_hierarchy.get("shot") or self.ti_name,
+        }
+        for key in self.shot_path_tokens:
+            self.ui_inputs["hierarchyData"]["value"][key]["value"] = self.shot_path_tokens[key]
+
+    def solve_path_token_hierarchy(self):
+        """Override self.hierarchy with new inferred path tokens."""
+        # Don't change ui_inputs - this is needed for next iterations
+
+        if self.shot_path_tokens.get("season"):
+            new_subpath = "{season}/{episode}/{sequence}"
+        elif self.shot_path_tokens.get("episode"):
+            new_subpath = "{episode}/{sequence}"
+        elif self.shot_path_tokens.get("sequence"):
+            new_subpath = "{sequence}"
+        else:
+            new_subpath = ""
+
+        self.hierarchy = self.hierarchy.replace("{path}", new_subpath)
+    ### Ends Alkemy-X Override ###
 
     def _populate_track_item_default_data(self):
         """ Populate default formatting data from track item. """
@@ -899,6 +960,13 @@ class PublishClip:
         # remove shot from hierarchy data: is not needed anymore
         hierarchy_formatting_data.pop("shot")
 
+        ### Starts Alkemy-X Override ###
+        # Add review to plate or take publishes
+        # reference family will already be in review form
+        # NOTE: What if reference family media is not playable in SG?
+        families = [self.product_type, self.data["productType"], "review"]
+        ### Ends Alkemy-X Override ###
+
         return {
             "newClipName": clip_name_filled,
             "hierarchy": hierarchy_filled,
@@ -906,7 +974,9 @@ class PublishClip:
             "hierarchyData": hierarchy_formatting_data,
             "productName": self.product_name,
             "productType": self.product_type,
-            "families": [self.product_type, self.data["productType"]]
+            ### Starts Alkemy-X Override ###
+            "families": families,
+            ### Ends Alkemy-X Override ###
         }
 
     def _convert_to_entity(self, src_type, template):

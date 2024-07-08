@@ -12,9 +12,12 @@ except:
     from PySide2.QtCore import *
 
 #----------------------------------------------
-a = hiero.ui.findMenuAction('Import File(s)...')
 # Note: You probably best to make this 'Ctrl+R' - currently conflicts with "Red" in the Viewer!
-a.setShortcut(QKeySequence("R"))
+### Starts Alkemy-x Override ###
+# Need Red in the Viewer - Commenting this out
+# a = hiero.ui.findMenuAction('Import File(s)...')
+# a.setShortcut(QKeySequence("R"))
+### Ends Alkemy-x Override ###
 #----------------------------------------------
 a = hiero.ui.findMenuAction('Import Folder(s)...')
 a.setShortcut(QKeySequence('Shift+R'))
