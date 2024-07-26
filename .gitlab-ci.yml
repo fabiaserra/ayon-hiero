@@ -1,0 +1,10 @@
+include:
+  - project: 'shared/ci-templates'
+    file: 'ayon-addon-util.yml'
+    ref: 'master'
+
+stages:
+  - init
+  - tag
+  - create
+  - upload
