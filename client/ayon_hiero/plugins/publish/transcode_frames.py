@@ -4,7 +4,7 @@ import pyblish.api
 
 import hiero
 
-from ayon_deadline.lib import submit
+from ayon_deadline.scripts import submit
 from ayon_deadline import constants as dl_constants
 
 from ayon_core.pipeline import publish
@@ -295,7 +295,7 @@ class TranscodeFrames(publish.Extractor):
                     task_name=task_name,
                     department="Editorial",
                     frame_range="{0}-{1}".format(src_frame_start, src_frame_end),
-                    group=dl_constants.OP_GROUP,
+                    group=dl_constants.AYON_GROUP,
                     comment=context.data.get("comment", ""),
                 )
 
